@@ -2,7 +2,7 @@ import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import warnings
-from segment import segment_select_from_rgb_and_depth, load_depth_mask
+from segment import segment_select_from_rgb_and_depth,load_depth_mask
 
 import cv2
 import numpy as np
@@ -13,12 +13,12 @@ from handLandmarks.handLandmarksDetection import (
 
 # Hard-coded root folder for the hand dataset
 DATASET_ROOT = Path(
-    r"C:\Users\Staff\OneDrive - University of Greenwich\HandsDatasets\handRGBD\train"
+    r"C:\Users\Staff\OneDrive - University of Greenwich\HandsDatasets\handRGBD\eval"
 )
 CSV_FILE = DATASET_ROOT / "reference_table.csv"
 IMAGES_DIR = DATASET_ROOT / "rgb"
 MASK_DIR = DATASET_ROOT / "mask"
-SHOW_VISUALIZATION = False  # Set to True to visualize masks during loading
+SHOW_VISUALIZATION = True  # Set to True to visualize masks during loading
 
 class HandBoundingBoxNotFound(RuntimeError):
     """Raised when no hand bounding box can be inferred for an image."""
@@ -125,64 +125,26 @@ def load_dataset(update_csv: bool = True) -> List[Tuple[Dict[str, str], Path, np
                 row["bbox"] = bbox_value
             updated_rows.append(row)
 
-            # Convert BGR (OpenCV default) to RGB for downstream use
-            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-
-            # Run segmentation and selection
+            # RGB Mask 
             try:
-                combined_mask_u8, _ = segment_select_from_rgb_and_depth(
+                combined_mask_u8, kept_masks, _ = segment_select_from_rgb_and_depth(
                     image_rgb, depth_mask_bool
                 )
             except Exception as exc:
                 warnings.warn(f"Segmentation failed for {image_path}: {exc}", RuntimeWarning)
                 continue
 
-            # Save combined mask next to dataset masks folder
-            saved_path = save_mask(combined_mask_u8.astype(bool), image_path)
+            # Save combined mask to the same folder as original logic
+            saved_path = save_mask(combined_mask_u8.astype(bool), DATASET_ROOT)
             print(f"Saved combined kept mask to {saved_path}")
 
             if SHOW_VISUALIZATION:
-                try:
-                    import matplotlib.pyplot as plt
-                except Exception as e:
-                    warnings.warn(f"Matplotlib unavailable for visualization: {e}", RuntimeWarning)
-                else:
-                    # Build a 1x4 panel: RGB | Depth Mask | Combined Mask | Overlay
-                    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-                    fig.suptitle(image_path.name)
-                    ax_rgb, ax_depth, ax_combined, ax_overlay = axes
+                # show combined mask visualization
 
-                    # 1) RGB
-                    ax_rgb.imshow(image_rgb)
-                    ax_rgb.set_title("RGB")
-                    ax_rgb.axis("off")
-
-                    # 2) Depth mask (bool -> grayscale) with kept centroids
-                    ax_depth.imshow(depth_mask_bool, cmap="gray")                  
-                    ax_depth.set_title("Depth Mask + Centroids")
-                    ax_depth.axis("off")
-
-                    # 3) Combined mask (uint8 -> grayscale)
-                    ax_combined.imshow(combined_mask_u8, cmap="gray")
-                    ax_combined.set_title("Combined Mask")
-                    ax_combined.axis("off")
-
-                    # 4) Overlay combined mask in red
-                    overlay = image_rgb.copy()
-                    red = np.zeros_like(image_rgb)
-                    red[..., 0] = 255
-                    alpha = 0.4
-                    mask_bool = combined_mask_u8 > 0
-                    overlay[mask_bool] = (
-                        (1 - alpha) * overlay[mask_bool] + alpha * red[mask_bool]
-                    ).astype(np.uint8)
-                    ax_overlay.imshow(overlay)
-                    ax_overlay.set_title("Overlay")
-                    ax_overlay.axis("off")
-
-                    fig.tight_layout()
-                    plt.show()
-
+                
+    
+            # Convert BGR (OpenCV default) to RGB for downstream use
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             samples.append((row.copy(), image_path, image_rgb))
 
     if update_csv:
@@ -198,3 +160,4 @@ if __name__ == "__main__":
     dataset = load_dataset()
     print(f"Loaded {len(dataset)} samples from {IMAGES_DIR}")
     print(f"Updated bounding boxes stored in {CSV_FILE}")
+

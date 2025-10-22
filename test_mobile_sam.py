@@ -11,31 +11,12 @@ import torch
 import cv2
 
 from load_hand_dataset import load_dataset
-from mobile_sam import SamAutomaticMaskGenerator, sam_model_registry
+from segment import segment_select_from_rgb_and_depth
 
 
 def parse_bbox(value: str) -> Optional[Tuple[int, int, int, int]]:
-    """Parse bbox string 'xmin,ymin,xmax,ymax' into integers."""
-    value = value.strip()
-    if not value:
-        return None
-
-    try:
-        parts = [int(float(token)) for token in value.split(",")]
-    except ValueError:
-        warnings.warn(f"Invalid bbox format: '{value}'", RuntimeWarning)
-        return None
-
-    if len(parts) != 4:
-        warnings.warn(f"Bbox does not have 4 values: '{value}'", RuntimeWarning)
-        return None
-
-    xmin, ymin, xmax, ymax = parts
-    if xmax <= xmin or ymax <= ymin:
-        warnings.warn(f"Bbox has non-positive area: '{value}'", RuntimeWarning)
-        return None
-
-    return xmin, ymin, xmax, ymax
+    """Deprecated: bbox parsing not used anymore."""
+    return None
 
 
 def bbox_center(bbox: Sequence[int]) -> np.ndarray:
@@ -211,37 +192,24 @@ def save_mask(segmentation: np.ndarray, image_path: Path) -> Path:
 def main(show_visualization: bool = False) -> None:
     dataset = load_dataset(update_csv=False)
 
-    model_type = "vit_t"
-    checkpoint = "weights/mobile_sam.pt"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-
-    sam = sam_model_registry[model_type](checkpoint=checkpoint)
-    sam.to(device=device)
-    mask_generator = SamAutomaticMaskGenerator(sam)
-
-    for metadata, image_path, image_rgb in dataset:
-        bbox = parse_bbox(metadata.get("bbox", ""))
-        if bbox is None:
-            warnings.warn(f"Skipping {image_path}: missing or invalid bbox", RuntimeWarning)
+    for metadata, image_path, image_rgb, depth_mask_path, depth_mask_bool in dataset:
+        try:
+            combined_mask_u8, kept_masks, kept_centroids = segment_select_from_rgb_and_depth(
+                image_rgb, depth_mask_bool
+            )
+        except Exception as exc:
+            warnings.warn(f"Segmentation failed for {image_path}: {exc}", RuntimeWarning)
             continue
 
-        masks = mask_generator.generate(image_rgb)
-        best_mask_dict = select_mask_by_bbox(masks, bbox)
-        if best_mask_dict is None:
-            warnings.warn(f"No suitable mask found for {image_path}", RuntimeWarning)
-            continue
+        # Save combined mask to the same folder as original logic
+        saved_path = save_mask(combined_mask_u8.astype(bool), image_path)
+        print(f"Saved combined kept mask to {saved_path}")
 
-        best_segmentation = best_mask_dict.get("segmentation")
-        if best_segmentation is None:
-            warnings.warn(f"Best mask missing segmentation for {image_path}", RuntimeWarning)
-            continue
-
-        saved_path = save_mask(best_segmentation, image_path)
-        print(f"Saved mask to {saved_path}")
-
-        if show_visualization:
-            show_masked_image(image_rgb, best_mask_dict, bbox, masks, Path(image_path).name)
+        if show_visualization and kept_masks:
+            # Build a pseudo best_mask for visualization (largest kept)
+            best_mask_dict = max(kept_masks, key=lambda m: m.get("area", 0))
+            bbox = (0, 0, image_rgb.shape[1] - 1, image_rgb.shape[0] - 1)
+            show_masked_image(image_rgb, best_mask_dict, bbox, kept_masks, Path(image_path).name)
 
 
 if __name__ == "__main__":
