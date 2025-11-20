@@ -17,7 +17,7 @@ import sys
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -53,6 +53,8 @@ REPLACEMENT_PREFIX = ("PassthroughSnapshot_Left_", "Mask_")
 
 THUMB_COLUMNS = 8
 THUMBNAIL_SIZE = QSize(200, 200)
+OVERLAY_COLOR_GENERATED: Tuple[int, int, int] = (0, 255, 0)
+OVERLAY_COLOR_CACHED: Tuple[int, int, int] = (40, 120, 255)
 
 
 @dataclass
@@ -62,6 +64,7 @@ class MaskRecord:
     mask: np.ndarray
     auto_mask: np.ndarray = field(repr=False)
     modified: bool = False
+    from_disk: bool = False
 
     def reset_to_auto(self) -> None:
         self.mask = self.auto_mask.copy()
@@ -74,6 +77,10 @@ class MaskRecord:
             self.mask = new_mask
             self.modified = not np.array_equal(self.mask, self.auto_mask)
         return changed
+
+    @property
+    def overlay_color(self) -> Tuple[int, int, int]:
+        return OVERLAY_COLOR_CACHED if self.from_disk else OVERLAY_COLOR_GENERATED
 
 
 class SamHelper:
@@ -347,7 +354,11 @@ class MaskEditorWindow(QWidget):
         self.on_mask_updated(self.record)
 
     def _refresh_views(self) -> None:
-        overlay = apply_mask_overlay(self.record.image_rgb, self.current_mask)
+        overlay = apply_mask_overlay(
+            self.record.image_rgb,
+            self.current_mask,
+            color=self.record.overlay_color,
+        )
         overlay_pix = numpy_to_qpixmap(overlay)
         self.original_label.set_pixmap(overlay_pix)
 
@@ -432,13 +443,19 @@ class ThumbnailGridWindow(QWidget):
             )
 
 
-def apply_mask_overlay(image_rgb: np.ndarray, mask: np.ndarray, alpha: float = 0.45) -> np.ndarray:
+def apply_mask_overlay(
+    image_rgb: np.ndarray,
+    mask: np.ndarray,
+    *,
+    color: Tuple[int, int, int] = OVERLAY_COLOR_GENERATED,
+    alpha: float = 0.45,
+) -> np.ndarray:
     overlay = image_rgb.copy()
     mask_bool = mask.astype(bool)
-    color = np.array([0, 255, 0], dtype=np.float32)
+    color_arr = np.array(color, dtype=np.float32)
     blended = overlay.astype(np.float32)
     blended[mask_bool] = (
-        (1.0 - alpha) * blended[mask_bool] + alpha * color
+        (1.0 - alpha) * blended[mask_bool] + alpha * color_arr
     )
     return blended.clip(0, 255).astype(np.uint8)
 
@@ -461,7 +478,7 @@ def numpy_to_qpixmap(image: np.ndarray) -> QPixmap:
 
 
 def build_thumbnail_pixmap(record: MaskRecord, target_size: QSize) -> QPixmap:
-    overlay = apply_mask_overlay(record.image_rgb, record.mask)
+    overlay = apply_mask_overlay(record.image_rgb, record.mask, color=record.overlay_color)
     pixmap = numpy_to_qpixmap(overlay)
     return pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
@@ -503,18 +520,39 @@ def find_passthrough_images(root: Path) -> List[Path]:
     return matches
 
 
+def load_existing_mask(mask_path: Path) -> Optional[np.ndarray]:
+    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        warnings.warn(f"Failed to read cached mask: {mask_path}", RuntimeWarning)
+        return None
+    return mask > 127
+
+
 def build_records(helper: SamHelper, image_paths: Sequence[Path]) -> List[MaskRecord]:
     records: List[MaskRecord] = []
     total = len(image_paths)
     for idx, image_path in enumerate(image_paths, start=1):
-        print(f"[{idx}/{total}] Generating mask for {image_path.name}")
         image_rgb = load_image_rgb(image_path)
-        mask = helper.generate_initial_mask(image_rgb)
+        mask: Optional[np.ndarray] = None
+        from_disk = False
+
+        cached_mask_path = build_output_path(image_path)
+        if cached_mask_path.exists():
+            mask = load_existing_mask(cached_mask_path)
+            if mask is not None:
+                from_disk = True
+                print(f"[{idx}/{total}] Loaded cached mask {cached_mask_path.name}")
+
+        if mask is None:
+            print(f"[{idx}/{total}] Generating mask for {image_path.name}")
+            mask = helper.generate_initial_mask(image_rgb)
+
         record = MaskRecord(
             image_path=image_path,
             image_rgb=image_rgb,
             mask=mask.copy(),
             auto_mask=mask.copy(),
+            from_disk=from_disk,
         )
         records.append(record)
     return records
