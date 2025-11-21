@@ -8,11 +8,12 @@ Steps covered by this tool:
 4. Let users open any thumbnail to refine the mask interactively via point clicks.
 5. Save all masks with filenames starting with "Mask_" instead of "PassthroughSnapshot_Left_".
 
-Adjust the HARD_CODED_FOLDER constant below if the dataset location changes.
+Adjust the DATASETS_ROOT constant or use --root if the dataset location changes.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -44,10 +45,11 @@ from mobile_sam.build_sam import sam_model_registry
 from mobile_sam.predictor import SamPredictor
 
 
-# Hard-coded folder containing PassthroughSnapshot PNG files
-HARD_CODED_FOLDER = Path(
-    r"test folder"
+# Hard-coded parent folder containing subfolders with PassthroughSnapshot PNGs
+DATASETS_ROOT = Path(
+    r"C:\Users\Staff\OneDrive - University of Greenwich\CyberASAP\phase2\data collection\Data"
 )
+LIST_DISPLAY_LIMIT = 10
 FILENAME_TOKEN = "PassthroughSnapshot"
 REPLACEMENT_PREFIX = ("PassthroughSnapshot_Left_", "Mask_")
 
@@ -370,13 +372,17 @@ class MaskEditorWindow(QWidget):
 class ThumbnailGridWindow(QWidget):
     """Main window showing thumbnails and Save All button."""
 
-    def __init__(self, records: Sequence[MaskRecord], sam_helper: SamHelper) -> None:
+    def __init__(self, records: Sequence[MaskRecord], sam_helper: SamHelper, dataset_folder: Path) -> None:
         super().__init__()
         self.records = list(records)
         self.sam_helper = sam_helper
         self.editors: List[MaskEditorWindow] = []
-        self.setWindowTitle("PassthroughSnapshot Mask Review")
+        self.setWindowTitle(f"PassthroughSnapshot Mask Review — {dataset_folder.name}")
         self.resize(1400, 900)
+
+        header_label = QLabel(dataset_folder.name)
+        header_label.setAlignment(Qt.AlignCenter)
+        header_label.setStyleSheet("font-size: 22pt; font-weight: 700; padding: 8px 0;")
 
         self.grid_widget = QWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
@@ -401,6 +407,7 @@ class ThumbnailGridWindow(QWidget):
         save_btn.clicked.connect(self._save_all_masks)
 
         main_layout = QVBoxLayout()
+        main_layout.addWidget(header_label)
         main_layout.addWidget(scroll_area)
         main_layout.addWidget(save_btn)
         self.setLayout(main_layout)
@@ -507,7 +514,7 @@ def load_image_rgb(path: Path) -> np.ndarray:
     return cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
 
-def find_passthrough_images(root: Path) -> List[Path]:
+def find_passthrough_images(root: Path, *, raise_if_missing: bool = True) -> List[Path]:
     if not root.exists():
         raise FileNotFoundError(f"Input folder does not exist: {root}")
     matches = [
@@ -516,7 +523,9 @@ def find_passthrough_images(root: Path) -> List[Path]:
         if FILENAME_TOKEN in p.name
     ]
     if not matches:
-        raise RuntimeError(f"No PNG files containing '{FILENAME_TOKEN}' found under {root}")
+        if raise_if_missing:
+            raise RuntimeError(f"No PNG files containing '{FILENAME_TOKEN}' found under {root}")
+        return []
     return matches
 
 
@@ -526,6 +535,81 @@ def load_existing_mask(mask_path: Path) -> Optional[np.ndarray]:
         warnings.warn(f"Failed to read cached mask: {mask_path}", RuntimeWarning)
         return None
     return mask > 127
+
+
+def list_folders_missing_masks(root: Path) -> List[Path]:
+    missing: List[Path] = []
+    if not root.exists():
+        return missing
+    subfolders = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+    for folder in subfolders:
+        images = find_passthrough_images(folder, raise_if_missing=False)
+        if not images:
+            continue
+        needs_masks = any(not build_output_path(img).exists() for img in images)
+        if needs_masks:
+            missing.append(folder)
+    return missing
+
+
+def summarize_folder_coverage(root: Path) -> Tuple[int, int, int]:
+    total = 0
+    with_masks = 0
+    without_masks = 0
+    subfolders = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+    for folder in subfolders:
+        images = find_passthrough_images(folder, raise_if_missing=False)
+        if not images:
+            continue
+        total += 1
+        needs_masks = any(not build_output_path(img).exists() for img in images)
+        if needs_masks:
+            without_masks += 1
+        else:
+            with_masks += 1
+    return total, with_masks, without_masks
+
+
+def prompt_for_dataset_folder(
+    root: Path,
+    missing_folders: Sequence[Path],
+    limit: int = LIST_DISPLAY_LIMIT,
+) -> Path:
+    display_count = min(limit, len(missing_folders))
+    if missing_folders:
+        print(f"\nFolders missing masks (showing up to {display_count}):")
+        for idx, folder in enumerate(missing_folders[:display_count], start=1):
+            print(f"  {idx}. {folder.name}")
+        print(
+            "\nEnter a number from the list above to open it, "
+            "or type a folder name/path (relative to root) to open another folder."
+        )
+        print("Press Enter with no input to open the first folder in the list.")
+    else:
+        print(
+            "\nAll subfolders appear to contain masks. "
+            "Type the name of a folder to open it (relative to root) or an absolute path."
+        )
+
+    while True:
+        choice = input("Folder selection: ").strip()
+        if not choice:
+            if missing_folders:
+                return missing_folders[0]
+            print("Please enter a folder name or absolute path.")
+            continue
+        if choice.isdigit() and display_count > 0:
+            idx = int(choice)
+            if 1 <= idx <= display_count:
+                return missing_folders[idx - 1]
+            print(f"Enter a number between 1 and {display_count}.")
+            continue
+        candidate = Path(choice)
+        if not candidate.is_absolute():
+            candidate = root / choice
+        if candidate.is_dir():
+            return candidate
+        print(f"Folder not found: {candidate}. Try again.")
 
 
 def build_records(helper: SamHelper, image_paths: Sequence[Path]) -> List[MaskRecord]:
@@ -559,14 +643,51 @@ def build_records(helper: SamHelper, image_paths: Sequence[Path]) -> List[MaskRe
 
 
 def main() -> None:
-    print(f"Scanning for PassthroughSnapshot PNG files under: {HARD_CODED_FOLDER}")
-    image_paths = find_passthrough_images(HARD_CODED_FOLDER)
+    parser = argparse.ArgumentParser(description="Interactive MobileSAM labeling assistant.")
+    parser.add_argument(
+        "--root",
+        type=str,
+        default=str(DATASETS_ROOT),
+        help="Parent folder containing per-session subfolders (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--folder",
+        type=str,
+        help="Specific subfolder to open (absolute path or relative to --root).",
+    )
+    args = parser.parse_args()
+
+    root = Path(args.root).expanduser()
+    if not root.is_dir():
+        raise SystemExit(f"Root folder not found: {root}")
+
+    if args.folder:
+        candidate = Path(args.folder).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if not candidate.is_dir():
+            raise SystemExit(f"Dataset folder not found: {candidate}")
+        target_folder = candidate
+    else:
+        missing = list_folders_missing_masks(root)
+        total, with_masks, without_masks = summarize_folder_coverage(root)
+        if total > 0:
+            pct_with = (with_masks / total) * 100.0
+            pct_without = (without_masks / total) * 100.0
+            print(
+                f"\nFolder coverage summary: {with_masks}/{total} ({pct_with:.1f}%) with masks, "
+                f"{without_masks}/{total} ({pct_without:.1f}%) without masks."
+            )
+        target_folder = prompt_for_dataset_folder(root, missing, LIST_DISPLAY_LIMIT)
+
+    print(f"\nScanning for PassthroughSnapshot PNG files under: {target_folder}")
+    image_paths = find_passthrough_images(target_folder)
     print(f"Found {len(image_paths)} candidates.")
     sam_helper = SamHelper()
     records = build_records(sam_helper, image_paths)
 
     app = QApplication(sys.argv)
-    window = ThumbnailGridWindow(records, sam_helper)
+    window = ThumbnailGridWindow(records, sam_helper, target_folder)
     window.show()
     sys.exit(app.exec())
 
