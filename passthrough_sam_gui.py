@@ -27,6 +27,7 @@ from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -57,6 +58,10 @@ THUMB_COLUMNS = 8
 THUMBNAIL_SIZE = QSize(200, 200)
 OVERLAY_COLOR_GENERATED: Tuple[int, int, int] = (0, 255, 0)
 OVERLAY_COLOR_CACHED: Tuple[int, int, int] = (40, 120, 255)
+PEN_BRUSH_RADIUS = 6
+EDIT_MODE_SAM = "SAM"
+EDIT_MODE_FLOOD = "Flood fill"
+EDIT_MODE_PEN = "Pen"
 
 
 @dataclass
@@ -234,6 +239,7 @@ class ImageClickLabel(QLabel):
     """QLabel showing an image and emitting click coordinates in image space."""
 
     clicked = Signal(float, float, Qt.MouseButton)
+    dragged = Signal(float, float, Qt.MouseButton)
 
     def __init__(self) -> None:
         super().__init__()
@@ -268,16 +274,40 @@ class ImageClickLabel(QLabel):
         self._scale_h = scaled.height() / max(1, self._pixmap.height())
 
     def mousePressEvent(self, event) -> None:  # pragma: no cover - GUI runtime
-        if event.button() not in (Qt.LeftButton, Qt.RightButton) or self._pixmap is None or self._scaled_pixmap is None:
+        if event.button() not in (Qt.LeftButton, Qt.RightButton):
             return
+        mapped = self._map_position(event)
+        if mapped is None:
+            return
+        image_x, image_y = mapped
+        self.clicked.emit(image_x, image_y, event.button())
+
+    def mouseMoveEvent(self, event) -> None:  # pragma: no cover - GUI runtime
+        buttons = event.buttons()
+        button = None
+        if buttons & Qt.LeftButton:
+            button = Qt.LeftButton
+        elif buttons & Qt.RightButton:
+            button = Qt.RightButton
+        if button is None:
+            return
+        mapped = self._map_position(event)
+        if mapped is None:
+            return
+        image_x, image_y = mapped
+        self.dragged.emit(image_x, image_y, button)
+
+    def _map_position(self, event) -> Optional[Tuple[float, float]]:
+        if self._pixmap is None or self._scaled_pixmap is None:
+            return None
         pos = event.position() if hasattr(event, "position") else event.pos()
         x = pos.x() - self._offset.x()
         y = pos.y() - self._offset.y()
         if not (0 <= x <= self._scaled_pixmap.width() and 0 <= y <= self._scaled_pixmap.height()):
-            return
+            return None
         image_x = x / max(self._scale_w, 1e-6)
         image_y = y / max(self._scale_h, 1e-6)
-        self.clicked.emit(image_x, image_y, event.button())
+        return image_x, image_y
 
 
 class MaskEditorWindow(QWidget):
@@ -305,8 +335,13 @@ class MaskEditorWindow(QWidget):
         self.mask_label = ImageClickLabel()
 
         info_label = QLabel(
-            "Left click to add segments, right click to remove.\nYou can interact with either the RGB or mask preview."
+            "SAM: left click adds segments, right click removes.\n"
+            "Flood fill: left click fills black, right click fills white.\n"
+            "Pen: left click draws white, right click draws black."
         )
+        self.mode_selector = QComboBox()
+        self.mode_selector.addItems([EDIT_MODE_SAM, EDIT_MODE_FLOOD, EDIT_MODE_PEN])
+        self.mode_selector.setToolTip("Select how clicks modify the mask.")
 
         reset_btn = QPushButton("Reset to auto mask")
         close_btn = QPushButton("Close editor")
@@ -315,11 +350,18 @@ class MaskEditorWindow(QWidget):
         close_btn.clicked.connect(self.close)
         self.original_label.clicked.connect(self._handle_click)
         self.mask_label.clicked.connect(self._handle_click)
+        self.original_label.dragged.connect(self._handle_drag)
+        self.mask_label.dragged.connect(self._handle_drag)
 
         button_layout = QHBoxLayout()
         button_layout.addWidget(reset_btn)
         button_layout.addWidget(close_btn)
         button_layout.addStretch()
+
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Edit mode:"))
+        mode_layout.addWidget(self.mode_selector)
+        mode_layout.addStretch()
 
         images_layout = QHBoxLayout()
         images_layout.addWidget(self.original_label)
@@ -329,12 +371,22 @@ class MaskEditorWindow(QWidget):
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(info_label)
+        main_layout.addLayout(mode_layout)
         main_layout.addLayout(images_layout)
         main_layout.addLayout(button_layout)
         self.setLayout(main_layout)
         self._refresh_views()
 
     def _handle_click(self, x: float, y: float, button: Qt.MouseButton) -> None:
+        mode = self.mode_selector.currentText()
+        if mode == EDIT_MODE_FLOOD:
+            fill_white = button == Qt.RightButton
+            self._apply_new_mask(flood_fill_mask(self.current_mask, (x, y), fill_white))
+            return
+        if mode == EDIT_MODE_PEN:
+            draw_white = button == Qt.LeftButton
+            self._apply_new_mask(draw_on_mask(self.current_mask, (x, y), PEN_BRUSH_RADIUS, draw_white))
+            return
         mask = self.sam_helper.mask_from_point(self.predictor, (x, y))
         if mask is None:
             return
@@ -343,6 +395,15 @@ class MaskEditorWindow(QWidget):
             new_mask = np.logical_and(self.current_mask, ~mask_bool)
         else:
             new_mask = np.logical_or(self.current_mask, mask_bool)
+        self._apply_new_mask(new_mask)
+
+    def _handle_drag(self, x: float, y: float, button: Qt.MouseButton) -> None:
+        if self.mode_selector.currentText() != EDIT_MODE_PEN:
+            return
+        draw_white = button == Qt.LeftButton
+        self._apply_new_mask(draw_on_mask(self.current_mask, (x, y), PEN_BRUSH_RADIUS, draw_white))
+
+    def _apply_new_mask(self, new_mask: np.ndarray) -> None:
         self.current_mask = new_mask
         mask_changed = self.record.update_mask(new_mask)
         self._refresh_views()
@@ -465,6 +526,64 @@ def apply_mask_overlay(
         (1.0 - alpha) * blended[mask_bool] + alpha * color_arr
     )
     return blended.clip(0, 255).astype(np.uint8)
+
+
+def draw_on_mask(
+    mask: np.ndarray, center_xy: tuple[float, float], radius: int, draw_white: bool
+) -> np.ndarray:
+    height, width = mask.shape[:2]
+    if height == 0 or width == 0:
+        return mask
+    cx = int(round(center_xy[0]))
+    cy = int(round(center_xy[1]))
+    if cx < 0 or cx >= width or cy < 0 or cy >= height:
+        return mask
+
+    y0 = max(0, cy - radius)
+    y1 = min(height, cy + radius + 1)
+    x0 = max(0, cx - radius)
+    x1 = min(width, cx + radius + 1)
+    if y0 >= y1 or x0 >= x1:
+        return mask
+
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    circle = (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
+    updated = mask.copy()
+    if draw_white:
+        updated[y0:y1, x0:x1][circle] = True
+    else:
+        updated[y0:y1, x0:x1][circle] = False
+    return updated
+
+
+def flood_fill_mask(
+    mask: np.ndarray, seed_xy: tuple[float, float], fill_white: bool
+) -> np.ndarray:
+    height, width = mask.shape[:2]
+    if height == 0 or width == 0:
+        return mask
+    x = int(round(seed_xy[0]))
+    y = int(round(seed_xy[1]))
+    if x < 0 or x >= width or y < 0 or y >= height:
+        return mask
+
+    mask_u8 = np.ascontiguousarray(np.where(mask, 255, 0).astype(np.uint8))
+    new_val = 255 if fill_white else 0
+    if int(mask_u8[y, x]) == new_val:
+        return mask
+
+    fill_mask = np.zeros((height + 2, width + 2), dtype=np.uint8)
+    flags = 4 | cv2.FLOODFILL_FIXED_RANGE
+    cv2.floodFill(
+        mask_u8,
+        fill_mask,
+        seedPoint=(x, y),
+        newVal=new_val,
+        loDiff=0,
+        upDiff=0,
+        flags=flags,
+    )
+    return mask_u8 > 127
 
 
 def mask_to_rgb(mask: np.ndarray) -> np.ndarray:
