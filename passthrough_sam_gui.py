@@ -62,6 +62,7 @@ PEN_BRUSH_RADIUS = 6
 EDIT_MODE_SAM = "SAM"
 EDIT_MODE_FLOOD = "Flood fill"
 EDIT_MODE_PEN = "Pen"
+HISTORY_LIMIT = 3
 
 
 @dataclass
@@ -327,6 +328,8 @@ class MaskEditorWindow(QWidget):
         self.predictor = self.sam_helper.create_predictor()
         self.predictor.set_image(self.record.image_rgb)
         self.current_mask = record.mask.copy()
+        self.undo_stack: List[np.ndarray] = []
+        self.redo_stack: List[np.ndarray] = []
 
         self.setWindowTitle(self.record.image_path.name)
         self.resize(1000, 600)
@@ -343,10 +346,24 @@ class MaskEditorWindow(QWidget):
         self.mode_selector.addItems([EDIT_MODE_SAM, EDIT_MODE_FLOOD, EDIT_MODE_PEN])
         self.mode_selector.setToolTip("Select how clicks modify the mask.")
 
+        undo_btn = QPushButton("Undo")
+        redo_btn = QPushButton("Redo")
+        self.undo_button = undo_btn
+        self.redo_button = redo_btn
+        grow_btn = QPushButton("Grow 1 px")
+        shrink_btn = QPushButton("Shrink 1 px")
         reset_btn = QPushButton("Reset to auto mask")
         close_btn = QPushButton("Close editor")
 
+        undo_btn.setToolTip("Undo last mask change (up to 3).")
+        redo_btn.setToolTip("Redo last undone change (up to 3).")
+        grow_btn.setToolTip("Expand white mask regions by 1 pixel.")
+        shrink_btn.setToolTip("Contract white mask regions by 1 pixel.")
         reset_btn.clicked.connect(self._handle_reset)
+        undo_btn.clicked.connect(self._handle_undo)
+        redo_btn.clicked.connect(self._handle_redo)
+        grow_btn.clicked.connect(self._handle_grow)
+        shrink_btn.clicked.connect(self._handle_shrink)
         close_btn.clicked.connect(self.close)
         self.original_label.clicked.connect(self._handle_click)
         self.mask_label.clicked.connect(self._handle_click)
@@ -354,6 +371,10 @@ class MaskEditorWindow(QWidget):
         self.mask_label.dragged.connect(self._handle_drag)
 
         button_layout = QHBoxLayout()
+        button_layout.addWidget(undo_btn)
+        button_layout.addWidget(redo_btn)
+        button_layout.addWidget(grow_btn)
+        button_layout.addWidget(shrink_btn)
         button_layout.addWidget(reset_btn)
         button_layout.addWidget(close_btn)
         button_layout.addStretch()
@@ -376,6 +397,7 @@ class MaskEditorWindow(QWidget):
         main_layout.addLayout(button_layout)
         self.setLayout(main_layout)
         self._refresh_views()
+        self._update_history_buttons()
 
     def _handle_click(self, x: float, y: float, button: Qt.MouseButton) -> None:
         mode = self.mode_selector.currentText()
@@ -403,18 +425,50 @@ class MaskEditorWindow(QWidget):
         draw_white = button == Qt.LeftButton
         self._apply_new_mask(draw_on_mask(self.current_mask, (x, y), PEN_BRUSH_RADIUS, draw_white))
 
-    def _apply_new_mask(self, new_mask: np.ndarray) -> None:
+    def _apply_new_mask(self, new_mask: np.ndarray, *, record_history: bool = True) -> None:
+        changed = not np.array_equal(self.current_mask, new_mask)
+        if record_history and changed:
+            self.undo_stack.append(self.current_mask.copy())
+            if len(self.undo_stack) > HISTORY_LIMIT:
+                self.undo_stack.pop(0)
+            self.redo_stack.clear()
         self.current_mask = new_mask
         mask_changed = self.record.update_mask(new_mask)
         self._refresh_views()
         if mask_changed:
             self.on_mask_updated(self.record)
+        self._update_history_buttons()
+
+    def _handle_undo(self) -> None:
+        if not self.undo_stack:
+            return
+        self.redo_stack.append(self.current_mask.copy())
+        if len(self.redo_stack) > HISTORY_LIMIT:
+            self.redo_stack.pop(0)
+        previous = self.undo_stack.pop()
+        self._apply_new_mask(previous.copy(), record_history=False)
+
+    def _handle_redo(self) -> None:
+        if not self.redo_stack:
+            return
+        self.undo_stack.append(self.current_mask.copy())
+        if len(self.undo_stack) > HISTORY_LIMIT:
+            self.undo_stack.pop(0)
+        restored = self.redo_stack.pop()
+        self._apply_new_mask(restored.copy(), record_history=False)
+
+    def _update_history_buttons(self) -> None:
+        self.undo_button.setEnabled(bool(self.undo_stack))
+        self.redo_button.setEnabled(bool(self.redo_stack))
 
     def _handle_reset(self) -> None:
-        self.record.reset_to_auto()
-        self.current_mask = self.record.mask.copy()
-        self._refresh_views()
-        self.on_mask_updated(self.record)
+        self._apply_new_mask(self.record.auto_mask.copy())
+
+    def _handle_grow(self) -> None:
+        self._apply_new_mask(grow_mask_one_pixel(self.current_mask))
+
+    def _handle_shrink(self) -> None:
+        self._apply_new_mask(shrink_mask_one_pixel(self.current_mask))
 
     def _refresh_views(self) -> None:
         overlay = apply_mask_overlay(
@@ -526,6 +580,24 @@ def apply_mask_overlay(
         (1.0 - alpha) * blended[mask_bool] + alpha * color_arr
     )
     return blended.clip(0, 255).astype(np.uint8)
+
+
+def grow_mask_one_pixel(mask: np.ndarray) -> np.ndarray:
+    if mask.size == 0:
+        return mask
+    mask_u8 = np.where(mask, 255, 0).astype(np.uint8)
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    grown = cv2.dilate(mask_u8, kernel, iterations=1)
+    return grown > 127
+
+
+def shrink_mask_one_pixel(mask: np.ndarray) -> np.ndarray:
+    if mask.size == 0:
+        return mask
+    mask_u8 = np.where(mask, 255, 0).astype(np.uint8)
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    shrunk = cv2.erode(mask_u8, kernel, iterations=1)
+    return shrunk > 127
 
 
 def draw_on_mask(
