@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Extract 11k Hands Masks",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/extract_11k_hands_masks.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--dataset-root",
+        "C:\\Users\\Staff\\OneDrive - University of Greenwich\\HandsDatasets\\11kHands",
+        "--border-percentile",
+        "90",
+        "--refine-sam"
+      ]
+    },
+    {
+      "name": "Extract Archive Hands Masks",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/extract_archive_hands_masks.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--dataset-root",
+        "C:\\Users\\Staff\\OneDrive - University of Greenwich\\HandsDatasets\\archive",
+        "--refine-sam"
+      ]
+    }
+  ]
+}
