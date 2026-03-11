@@ -28,6 +28,19 @@
         "C:\\Users\\Staff\\OneDrive - University of Greenwich\\HandsDatasets\\archive",
         "--refine-sam"
       ]
+    },
+    {
+      "name": "Generate LUCID Masks From Landmarks",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/generate_lucid_masks_from_landmarks.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--dataset-root",
+        "C:\\Users\\Staff\\OneDrive - University of Greenwich\\CyberASAP\\phase2\\data collection\\Data",
+        "--overwrite"
+      ]
     }
   ]
 }
