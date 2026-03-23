@@ -56,6 +56,24 @@
         "masks",
         "--overwrite"
       ]
+    },
+    {
+      "name": "Create Masked RGB From Masks",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/create_masked_rgb_from_masks.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--dataset-root",
+        "C:\\Users\\Staff\\OneDrive - University of Greenwich\\HandsDatasets\\HaGRIDv2_stop_inverted",
+        "--mask-dir",
+        "masks",
+        "--output-dir",
+        "rgb_masked",
+        "--overwrite",
+        "--skip-missing-masks"
+      ]
     }
   ]
 }
