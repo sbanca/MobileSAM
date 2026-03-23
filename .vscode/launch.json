@@ -41,6 +41,21 @@
         "C:\\Users\\Staff\\OneDrive - University of Greenwich\\CyberASAP\\phase2\\data collection\\Data",
         "--overwrite"
       ]
+    },
+    {
+      "name": "Generate HaGRID Stop Inverted Masks From Landmarks",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/generate_hagrid_stop_inverted_masks_from_landmarks.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        "--dataset-root",
+        "C:\\Users\\Staff\\OneDrive - University of Greenwich\\HandsDatasets\\HaGRIDv2_stop_inverted",
+        "--output-dir",
+        "masks",
+        "--overwrite"
+      ]
     }
   ]
 }
